@@ -1,0 +1,67 @@
+name: grow-data-seed
+
+# Grows a UniXNU Data seed (DBRDISK1) on a macOS runner: the APFS container can only
+# be resized with Apple's own tools (hdiutil + diskutil apfs resizeContainer), which is
+# exactly what the runner has. The output keeps only the nonzero pages, so a 8 GiB seed
+# stays about as large as the input file. The volume UUID is unchanged, so a kernel
+# built for the original seed keeps matching it.
+on:
+  workflow_dispatch:
+    inputs:
+      gib:
+        description: Target container size in GiB (3..1024)
+        required: true
+        default: "8"
+      seed_path:
+        description: Seed file inside this repository
+        required: true
+        default: "seed/owner-data.dbr"
+      unixnu_ref:
+        description: UniXNU ref that carries scripts/seed-data-grow.py
+        required: true
+        default: "main"
+
+permissions:
+  contents: read
+
+jobs:
+  grow:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Check out this repository (holds the seed)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out UniXNU (holds the grow script)
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: ${{ inputs.unixnu_ref }}
+          path: unixnu
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Show the input seed
+        run: |
+          ls -l "${{ inputs.seed_path }}"
+
+      - name: Grow the APFS container
+        run: |
+          mkdir -p unixnu/build out
+          python3 unixnu/scripts/seed-data-grow.py \
+            --gib "${{ inputs.gib }}" \
+            "${{ inputs.seed_path }}" \
+            out/owner-data-grown.dbr
+          ls -l out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: owner-data-grown
+          path: out/owner-data-grown.dbr
+          if-no-files-found: error
+          retention-days: 7
