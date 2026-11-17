@@ -1,10 +1,5 @@
 name: grow-data-seed
 
-# Grows a UniXNU Data seed (DBRDISK1) on a macOS runner: the APFS container can only
-# be resized with Apple's own tools (hdiutil + diskutil apfs resizeContainer), which is
-# exactly what the runner has. The output keeps only the nonzero pages, so a 8 GiB seed
-# stays about as large as the input file. The volume UUID is unchanged, so a kernel
-# built for the original seed keeps matching it.
 on:
   workflow_dispatch:
     inputs:
@@ -12,50 +7,52 @@ on:
         description: Target container size in GiB (3..1024)
         required: true
         default: "8"
-      seed_path:
-        description: Seed file inside this repository
-        required: true
-        default: "seed/owner-data.dbr"
-      unixnu_ref:
-        description: UniXNU ref that carries scripts/seed-data-grow.py
-        required: true
-        default: "main"
 
 permissions:
   contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
 
 jobs:
   grow:
     runs-on: macos-26
     timeout-minutes: 60
     steps:
-      - name: Check out this repository (holds the seed)
+      - name: Check out this repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: false
 
       - name: Check out UniXNU (holds the grow script)
         uses: actions/checkout@v4
         with:
           repository: UniXNU/UniXNU
-          ref: ${{ inputs.unixnu_ref }}
           path: unixnu
-          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
-      - name: Show the input seed
+      - name: Show the environment
         run: |
-          ls -l "${{ inputs.seed_path }}"
+          set -x
+          uname -a
+          sw_vers || true
+          python3 -V
+          which hdiutil diskutil || true
+          ls -l
+          ls -l unixnu/scripts/seed-data-grow.py
+          python3 -c "import packed_ramdisk; print('packed_ramdisk OK', packed_ramdisk.__file__)"
 
       - name: Grow the APFS container
         run: |
+          set -eux
+          seed=$(find . -path ./unixnu -prune -o -name '*.dbr' -print | head -1)
+          echo "seed=$seed"
+          test -n "$seed" || { echo "no .dbr in repository"; exit 1; }
           mkdir -p unixnu/build out
           python3 unixnu/scripts/seed-data-grow.py \
             --gib "${{ inputs.gib }}" \
-            "${{ inputs.seed_path }}" \
+            "$seed" \
             out/owner-data-grown.dbr
           ls -l out/
 
