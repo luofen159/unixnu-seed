@@ -1,0 +1,85 @@
+name: extract-boot-tools
+
+# Pulls the boot-task binaries straight out of Apple's IPSW on a macOS runner, because
+# they live on an APFS volume that nothing on the Windows host can read. The artifacts
+# are the tools plus their launchd plists, so their failure conditions can be read on the
+# host instead of guessed at from exit codes.
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: IPSW URL for this OS build
+        required: true
+        default: "https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw"
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - name: Disk and tools
+        run: |
+          df -h /
+          sw_vers
+
+      - name: Download the IPSW
+        run: |
+          set -x
+          curl -L --retry 3 --retry-delay 5 -o ipsw.zip "${{ inputs.ipsw_url }}"
+          ls -l ipsw.zip
+          df -h /
+
+      - name: Find the OS disk image inside it
+        id: pick
+        run: |
+          set -x
+          unzip -l ipsw.zip | grep '\.dmg$' | head -20
+          name=$(unzip -l ipsw.zip | awk '/\.dmg$/ {print $1, $4}' | sort -nr | head -1 | awk '{print $2}')
+          echo "picked=$name"
+          echo "dmg=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Extract that image and drop the IPSW
+        run: |
+          set -eux
+          unzip -o ipsw.zip "${{ steps.pick.outputs.dmg }}"
+          rm -f ipsw.zip
+          ls -l *.dmg
+          df -h /
+
+      - name: Mount it and copy the tools
+        run: |
+          set -eux
+          mkdir -p out
+          img=$(ls -S *.dmg | head -1)
+          hdiutil attach -nobrowse -readonly -noverify "$img" || hdiutil attach -nobrowse -readonly "$img"
+          mp=$(ls -d /Volumes/* | grep -v '^/Volumes/Macintosh' | head -1)
+          echo "mounted=$mp" | tee out/mount.txt
+          ls "$mp" | head -20 | tee out/root-listing.txt
+
+          for n in prng_seedctl sysstatuscheck MSUEarlyBootTask launchd; do
+            find "$mp" -type f -name "$n" 2>/dev/null | head -5 | while read -r f; do
+              rel=${f#$mp}
+              mkdir -p "out/files$(dirname "$rel")"
+              cp "$f" "out/files$rel" || true
+              echo "copied $rel"
+            done
+          done
+
+          find "$mp" \( -name '*MSUEarlyBootTask*' -o -name '*sysstatuscheck*' \
+            -o -name '*prng_seedctl*' -o -name '*PrngSeed*' \) 2>/dev/null | head -40 > out/paths.txt || true
+          ls -l "$mp/sbin" 2>/dev/null > out/sbin.txt || true
+          ls -l "$mp/usr/libexec" 2>/dev/null | head -80 > out/libexec.txt || true
+          ls -R "$mp/private/var" 2>/dev/null | head -300 > out/var-listing.txt || true
+
+          find out/files -type f -exec shasum -a 256 {} \; 2>/dev/null | tee out/sha256.txt || true
+          hdiutil detach "$mp" -force || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: boot-tools
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
