@@ -1,0 +1,93 @@
+name: make-data-seed
+
+# Builds a real first-install Data seed from Apple's IPSW on a macOS runner. The seed is
+# an APFS volume that only Apple's own tools can create (hdiutil), and its content is a
+# copy of the OS image's /private/var skeleton, which is exactly what the boot tasks that
+# fail on the tablet are looking for (/var/db, /var/MobileSoftwareUpdate, /var/mobile).
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: IPSW URL for this OS build
+        required: true
+        default: "https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw"
+      gib:
+        description: Data container size in GiB
+        required: true
+        default: "8"
+      build:
+        description: Build version written into the seed's preferences
+        required: true
+        default: "21H461"
+      skip_setup:
+        description: Mark Setup as done (skips the Hello pages later)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  seed:
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - name: Check out this repository (holds packed_ramdisk.py)
+        uses: actions/checkout@v4
+
+      - name: Check out UniXNU (holds make-data-seed.py)
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          path: unixnu
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Disk before
+        run: df -h /
+
+      - name: Download the IPSW
+        run: |
+          set -x
+          curl -L --retry 3 --retry-delay 5 -o ipsw.zip "${{ inputs.ipsw_url }}"
+          ls -l ipsw.zip
+
+      - name: Pick and extract the OS image
+        id: pick
+        run: |
+          set -x
+          name=$(unzip -l ipsw.zip | awk '/\.dmg$/ {print $1, $4}' | sort -nr | head -1 | awk '{print $2}')
+          echo "picked=$name"
+          unzip -o ipsw.zip "$name"
+          rm -f ipsw.zip
+          ls -l *.dmg
+          df -h /
+          echo "dmg=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Make the seed
+        run: |
+          set -eux
+          img=$(ls -S *.dmg | head -1)
+          hdiutil attach -nobrowse -readonly -noverify "$img" || hdiutil attach -nobrowse -readonly "$img"
+          mp=$(ls -d /Volumes/* | grep -v '^/Volumes/Macintosh' | head -1)
+          echo "mounted=$mp"
+          ls "$mp" | head -20
+          ls "$mp/sbin/launchd" "$mp/private/var" >/dev/null
+          mkdir -p unixnu/build out
+          python3 unixnu/scripts/make-data-seed.py "$mp" out/owner-data.dbr \
+            --gib "${{ inputs.gib }}" --build "${{ inputs.build }}" ${{ inputs.skip_setup && '--skip-setup' || '' }}
+          ls -l out/
+          shasum -a 256 out/owner-data.dbr
+          hdiutil detach "$mp" -force || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: owner-data-full
+          path: out/owner-data.dbr
+          if-no-files-found: error
+          retention-days: 7
